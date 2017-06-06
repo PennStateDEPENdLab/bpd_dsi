@@ -1,0 +1,110 @@
+#!/bin/bash
+
+function rel() {
+    #function that runs, echos to terminal, and logs to file an arbitrary command
+    cmd="${1}"
+    logFile="${2}"
+    comment=0
+    trapoutput=0
+    if [[ -n "${3}" && ${3} = c ]]; then
+	comment=1
+    elif [[ -n "${3}" && ${3} = o ]]; then
+	trapoutput=1
+    fi
+    
+    if [ -n "${logFile}" ]; then
+	if [ $comment -eq 1 ]; then
+	    cmd="## ${cmd}"
+	fi
+	echo -e "${cmd}" >> "${logFile}"
+    fi
+
+    if [ $comment -eq 0 ]; then
+	#echo command to screen verbatim
+	echo ${cmd}
+
+	#run command
+	if [ $trapoutput -eq 0 ]; then
+	    eval ${cmd}
+	else
+	    #eval ${cmd} >> "${logFile}"
+	    #solution to include prefix on stdout and stderr
+	    (eval ${cmd} | sed 's/^/## stdout :/' >> $logFile) 2>&1 | sed 's/^/## stderr: /' >> $logFile
+	fi
+	cmdExit=$?
+    else
+	#echo command to screen with dashes to offset text visually
+	echo -e "----  ${cmd}"
+    fi
+    
+    return $cmdExit
+}
+
+function copy_raw {
+    local sid="${1}"
+    local rawdir="${2}"
+    local outname="${3}"
+    local pattern="${4}"
+    local negate="${5}"
+    local expect_dcm="${6}"
+    local logfile="${7}"
+
+    if [ -r ${procdir}/$sid/${outname}/.raw_copy_complete ]; then
+	return 0 #do not recopy
+    fi
+    
+    if [ -n "$negate" ]; then
+	mdir=($( find $rawdir -maxdepth 1 -iname "$pattern" -type d -print0 | sed 's/\x0/\n/g' | grep -vi "$negate" ))
+    else
+	mdir=($( find $rawdir -maxdepth 1 -iname "$pattern" -type d -print0 | sed 's/\x0/\n/g' ))
+    fi
+    
+    if [ ${#mdir[@]} -eq 1 ]; then
+	if [ ! -d ${procdir}/$sid/${outname} ]; then
+	    rel "cp -Rp ${mdir[0]} ${procdir}/${sid}/${outname}" $logfile
+	else
+	    rel "$outname directory already exists: ${procdir}/${sid}/${outname}" $logfile c
+	fi
+    elif [ ${#mdir[@]} -gt 1 ]; then
+	#echo "${mdir[@]}"
+	#echo "runNums: $runNums"
+	#echo "max: $max"
+	#echo "whichmax: $whichmax"
+	
+	goodDirs=() #empty array	
+	for d in "${mdir[@]}"; do
+	    efiles=$( ls ${d}/MR* | wc -l )
+	    if [ $efiles -eq ${expect_dcm} ]; then
+		goodDirs+=("$d")
+	    else
+		rel "Note that $d did not have $expect_dcm DICOM files as expected." $logfile c
+	    fi
+	done
+
+	#need to sort matches by run number for logic below
+	#runNums=$( echo "${mdir[@]}" | perl -pe 's:.*/.*[^\.]+\.(\d+)(?=\s*|$):\1:g' ) #not working
+	i=0; max=0; whichmax=0;
+	for d in ${goodDirs[@]}; do
+	    runNum=$( echo "$d" | perl -pe 's/.*\.(\d+)$/\1/' )
+	    if [[ $runNum -gt $max ]]; then
+		max=$runNum
+		whichmax=$i
+	    fi
+	    i=$((i+1))
+	done
+	
+	#if we still have more than one candidate, default to the last element
+	#these are sorted by series up front (sort -n), so assume that the second option was
+	#a reacquisition and the first one was messed up
+	if [ ${#goodDirs[@]} -gt 1 ]; then
+	    rel "There are multiple good matches for $pattern: ${goodDirs[@]}. Using the last one." $logfile c
+	fi
+	rel "cp -Rp ${goodDirs[$whichmax]} ${procdir}/${sid}/${outname}" $logfile
+    else
+	rel "Cannot find singular $outname dir. Matches: ${mdir[@]}" $logfile
+	return 0 #exit 1
+    fi
+
+    date > ${procdir}/$sid/${outname}/.raw_copy_complete
+    return 0
+}
